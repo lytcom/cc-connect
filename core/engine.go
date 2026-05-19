@@ -4711,6 +4711,8 @@ var builtinCommands = []struct {
 	{[]string{"web"}, "web"},
 	{[]string{"diff"}, "diff"},
 	{[]string{"ps", "btw"}, "ps"},
+	{[]string{"local"}, "local"},
+	{[]string{"server"}, "server"},
 }
 
 func (e *Engine) cmdPs(p Platform, msg *Message, args []string) {
@@ -4926,6 +4928,24 @@ func (e *Engine) handleCommand(p Platform, msg *Message, raw string) bool {
 		e.cmdWeb(p, msg, args)
 	case "ps":
 		e.cmdPs(p, msg, args)
+	case "local":
+		if e.remoteRouter != nil {
+			if handled, reply := e.remoteRouter.HandleSwitchCommand(msg.SessionKey, "/local"); handled {
+				e.reply(p, msg.ReplyCtx, reply)
+				return true
+			}
+		}
+		e.reply(p, msg.ReplyCtx, "已切换到个人电脑（当前无 agent 在线，将使用公用机）")
+		return true
+	case "server":
+		if e.remoteRouter != nil {
+			if handled, reply := e.remoteRouter.HandleSwitchCommand(msg.SessionKey, "/server"); handled {
+				e.reply(p, msg.ReplyCtx, reply)
+				return true
+			}
+		}
+		e.reply(p, msg.ReplyCtx, "已切换到公用机执行")
+		return true
 	default:
 		if custom, ok := e.commands.Resolve(cmd); ok {
 			if disabledCmds[strings.ToLower(custom.Name)] {
