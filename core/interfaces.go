@@ -574,3 +574,16 @@ const (
 type PreviewStatusUpdater interface {
 	SetPreviewStatus(previewHandle any, status CardStatus)
 }
+
+// RemoteRouter decides whether a message should be routed to a remote agent.
+// Implemented by agent/remote.Router, injected into Engine via SetRemoteRouter.
+type RemoteRouter interface {
+	// RouteMessage returns a remote Agent if the message should be forwarded,
+	// or nil to use the local agent.
+	RouteMessage(sessionKey, userID string) Agent
+	// HandleSwitchCommand processes /local and /server commands.
+	// Returns (true, reply) if consumed, (false, "") otherwise.
+	HandleSwitchCommand(sessionKey, content string) (handled bool, reply string)
+	// IsOnline checks if a user's remote agent is connected.
+	IsOnline(userID string) bool
+}

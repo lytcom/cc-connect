@@ -273,6 +273,9 @@ type Engine struct {
 
 	// Data directory for socket path injection
 	dataDir string
+
+	// Remote dispatch (personal computer routing)
+	remoteRouter RemoteRouter
 }
 
 // workspaceInitFlow tracks a channel that is being onboarded to a workspace.
@@ -2055,6 +2058,14 @@ func (e *Engine) handleMessage(p Platform, msg *Message) {
 		// Unrecognized slash command — fall through to agent as normal message
 	}
 
+	// Remote dispatch: handle /local and /server switch commands
+	if e.remoteRouter != nil {
+		if handled, reply := e.remoteRouter.HandleSwitchCommand(msg.SessionKey, content); handled {
+			e.reply(p, msg.ReplyCtx, reply)
+			return
+		}
+	}
+
 	// Permission responses bypass the session lock.
 	// Must be after workspace resolution so interactiveKey is correct.
 	if e.handlePendingPermission(p, msg, content, interactiveKey) {
@@ -2139,6 +2150,13 @@ sessionLocked:
 		"session", session.ID,
 	)
 
+
+	// Remote dispatch: route to personal computer if configured
+	if e.remoteRouter != nil {
+		if remoteAgent := e.remoteRouter.RouteMessage(msg.SessionKey, msg.UserID); remoteAgent != nil {
+			agent = remoteAgent
+		}
+	}
 	go e.processInteractiveMessageWith(p, msg, session, agent, sessions, interactiveKey, resolvedWorkspace, msg.SessionKey)
 }
 
@@ -13890,4 +13908,10 @@ func (e *Engine) cmdWebStatus(p Platform, msg *Message) {
 		return
 	}
 	e.reply(p, msg.ReplyCtx, fmt.Sprintf(e.i18n.T(MsgWebStatus), url))
+}
+
+// SetRemoteRouter injects the remote dispatch router.
+// Call this after NewEngine when remote dispatch is enabled.
+func (e *Engine) SetRemoteRouter(router RemoteRouter) {
+	e.remoteRouter = router
 }
