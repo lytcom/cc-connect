@@ -20,6 +20,8 @@ import (
 	"github.com/chenhg5/cc-connect/config"
 	"github.com/chenhg5/cc-connect/core"
 	"github.com/chenhg5/cc-connect/daemon"
+	"github.com/chenhg5/cc-connect/agent/remote"
+	"net/http"
 	// Agent and platform imports are in separate plugin_*.go files
 	// controlled by build tags. See Makefile for selective compilation.
 )
@@ -773,6 +775,26 @@ func main() {
 			return fmt.Sprintf("http://localhost:%d", port)
 		})
 
+
+		// Wire remote dispatch (personal computer routing)
+		{
+			dispatcher := remote.NewDispatcher()
+			stateFile := filepath.Join(cfg.DataDir, "remote_routing_state.json")
+			router := remote.NewRouter(dispatcher, stateFile)
+			engine.SetRemoteRouter(router)
+			// Start WebSocket server for remote agents
+			go func() {
+				mux := http.NewServeMux()
+				mux.HandleFunc("/ws", dispatcher.HandleConnect)
+				adminAPI := remote.NewAdminAPI(dispatcher, router.GetState())
+				adminAPI.RegisterHandlers(mux)
+				addr := ":8901"
+				slog.Info("remote dispatch WebSocket server starting", "addr", addr)
+				if err := http.ListenAndServe(addr, mux); err != nil {
+					slog.Error("remote dispatch server failed", "err", err)
+				}
+			}()
+		}
 		engines = append(engines, engine)
 		effectiveWorkDirs = append(effectiveWorkDirs, effectiveWorkDir)
 	}
