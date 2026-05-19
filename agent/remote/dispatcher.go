@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"log"
 	"net/http"
+	"time"
 	"sync"
 
 	"github.com/gorilla/websocket"
@@ -68,6 +69,11 @@ func (d *Dispatcher) HandleConnect(w http.ResponseWriter, r *http.Request) {
 		existing.Stop() // Kick old connection
 	}
 	agent := NewRemoteAgent(conn, reg.UserID)
+	agent.meta = AgentMeta{
+		ConnectedAt: time.Now(),
+		IP:          r.RemoteAddr,
+		Version:     reg.Version,
+	}
 	d.agents[reg.UserID] = agent
 	d.mu.Unlock()
 
@@ -115,4 +121,35 @@ func (d *Dispatcher) OnlineAgents() []string {
 		ids = append(ids, id)
 	}
 	return ids
+}
+
+// AgentMeta stores metadata about a connected agent.
+type AgentMeta struct {
+	ConnectedAt time.Time
+	IP          string
+	Version     string
+}
+
+// OnlineAgentsInfo returns detailed info about all connected agents.
+func (d *Dispatcher) OnlineAgentsInfo() []AgentInfo {
+	d.mu.RLock()
+	defer d.mu.RUnlock()
+	var infos []AgentInfo
+	for id, agent := range d.agents {
+		info := AgentInfo{
+			UserID:      id,
+			ConnectedAt: agent.meta.ConnectedAt,
+			IP:          agent.meta.IP,
+			Version:     agent.meta.Version,
+		}
+		// Get active session if any
+		agent.mu.Lock()
+		for sid := range agent.sessions {
+			info.SessionID = sid
+			break
+		}
+		agent.mu.Unlock()
+		infos = append(infos, info)
+	}
+	return infos
 }

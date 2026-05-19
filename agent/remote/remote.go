@@ -19,6 +19,7 @@ type RemoteAgent struct {
 	mu       sync.Mutex
 	conn     *websocket.Conn
 	userID   string
+	meta     AgentMeta
 	sessions map[string]*RemoteSession
 }
 
