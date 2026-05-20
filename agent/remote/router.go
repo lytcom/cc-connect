@@ -3,11 +3,16 @@
 package remote
 
 import (
+	"errors"
 	"log"
 	"strings"
 
 	"github.com/chenhg5/cc-connect/core"
 )
+
+// ErrAgentOffline is returned by RouteMessage when the user has configured
+// remote routing but their agent is not connected.
+var ErrAgentOffline = errors.New("remote agent offline")
 
 // Router integrates remote dispatch into the cc-connect message flow.
 type Router struct {
@@ -26,24 +31,24 @@ func NewRouter(dispatcher *Dispatcher, stateFile string) *Router {
 }
 
 // RouteMessage decides whether a message should go to a remote agent.
-// Returns the RemoteAgent if routing remotely, or nil for local execution.
-//
-// This is the ONE function that engine.go calls. Minimal invasion.
-func (r *Router) RouteMessage(sessionKey, userID string) core.Agent {
+// Returns the RemoteAgent if routing remotely, or (nil, nil) for local execution.
+// Returns (nil, ErrAgentOffline) when routing is configured for remote but the
+// agent is disconnected.
+func (r *Router) RouteMessage(sessionKey, userID string) (core.Agent, error) {
 	// Check routing target for this session
 	target := r.state.GetTarget(sessionKey)
 	if target != TargetLocal {
-		return nil // use local agent
+		return nil, nil // use local agent
 	}
 
 	// Check if the user's remote agent is online
 	agent := r.dispatcher.GetAgent(userID)
-	if agent == nil {
-		return nil // offline, fallback to local
+	if agent == nil || !agent.connAlive.Load() {
+		return nil, ErrAgentOffline
 	}
 
 	log.Printf("[remote-router] routing to remote agent: user=%s session=%s", userID, sessionKey)
-	return agent
+	return agent, nil
 }
 
 // HandleSwitchCommand processes /local and /server switch commands.
@@ -60,6 +65,14 @@ func (r *Router) HandleSwitchCommand(sessionKey, content string) (handled bool, 
 	case lower == "/server" || lower == "切到公用机" || lower == "switch to server" ||
 		strings.HasPrefix(lower, "@server"):
 		r.state.SetTarget(sessionKey, TargetServer)
+		// Send close_session to the agent so it can tear down the session
+		if userID := extractUserID(sessionKey); userID != "" {
+			if agent := r.dispatcher.GetAgent(userID); agent != nil {
+				if err := agent.SendCloseSession(sessionKey); err != nil {
+					log.Printf("[remote-router] failed to send close_session: %v", err)
+				}
+			}
+		}
 		return true, "已切换到公用机执行"
 	}
 
@@ -79,4 +92,14 @@ func (r *Router) GetState() *RoutingStateStore {
 // GetDispatcher returns the dispatcher (for admin operations).
 func (r *Router) GetDispatcher() *Dispatcher {
 	return r.dispatcher
+}
+
+// extractUserID extracts the user ID (last colon-separated segment) from a session key.
+// Session key format: "platform:chat_id:user_id" (e.g. "feishu:oc_xxx:ou_yyy").
+func extractUserID(sessionKey string) string {
+	idx := strings.LastIndex(sessionKey, ":")
+	if idx < 0 || idx == len(sessionKey)-1 {
+		return ""
+	}
+	return sessionKey[idx+1:]
 }

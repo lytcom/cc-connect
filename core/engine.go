@@ -2153,7 +2153,14 @@ sessionLocked:
 
 	// Remote dispatch: route to personal computer if configured
 	if e.remoteRouter != nil {
-		if remoteAgent := e.remoteRouter.RouteMessage(msg.SessionKey, msg.UserID); remoteAgent != nil {
+		remoteAgent, err := e.remoteRouter.RouteMessage(msg.SessionKey, msg.UserID)
+		if err != nil {
+			// Agent offline — notify user and return early
+			session.Unlock()
+			e.reply(p, msg.ReplyCtx, "你的本地设备已离线，发 /server 切回服务器处理")
+			return
+		}
+		if remoteAgent != nil {
 			agent = remoteAgent
 		}
 	}
@@ -2858,6 +2865,12 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 	e.interactiveMu.Lock()
 	defer e.interactiveMu.Unlock()
 
+	// Determine which agent this turn should use.
+	wantAgent := e.agent
+	if agentOverride != nil {
+		wantAgent = agentOverride
+	}
+
 	state, ok := e.interactiveStates[sessionKey]
 	if ok && state.agentSession != nil && state.agentSession.Alive() {
 		// Verify the running agent session matches the current active session.
@@ -2872,7 +2885,23 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		// If wantID is empty (/new, cleared session) but the process already has
 		// a concrete ID, reusing would keep --resume context — recycle (#238).
 		needRecycle := currentID != "" && (wantID == "" || wantID != currentID)
+		// Also recycle when the agent type changed (e.g. /local ↔ /server switch).
+		if !needRecycle && state.agent != wantAgent {
+			needRecycle = true
+		}
 		if !needRecycle {
+			// Refresh session env so remote agents get the current session key
+			// even when reusing an existing interactive state.
+			if inj, ok := wantAgent.(SessionEnvInjector); ok {
+				ccKey := sessionKey
+				if ccSessionKey != "" {
+					ccKey = ccSessionKey
+				}
+				inj.SetSessionEnv([]string{
+					"CC_PROJECT=" + e.name,
+					"CC_SESSION_KEY=" + ccKey,
+				})
+			}
 			return state
 		}
 		// Tear down the stale agent so we start one that matches the Session below.
@@ -2880,7 +2909,14 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 			"session_key", sessionKey,
 			"want_agent_session", wantID,
 			"have_agent_session", currentID,
+			"agent_changed", state.agent != wantAgent,
 		)
+		// When agent type changed (/local ↔ /server), clear the saved session ID
+		// so the new agent starts fresh instead of trying to resume an alien session.
+		if state.agent != wantAgent {
+			session.SetAgentSessionID("", "")
+			sessions.Save()
+		}
 		e.stopUnsolicitedReader(state)
 		state.markStopped()
 		// Close synchronously to prevent race condition where old agent

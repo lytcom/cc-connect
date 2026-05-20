@@ -23,7 +23,10 @@ func TestRouter_SwitchToLocal(t *testing.T) {
 		t.Fatal("should return confirmation message")
 	}
 
-	agent := router.RouteMessage(sessionKey, "ou_rt_001")
+	agent, err := router.RouteMessage(sessionKey, "ou_rt_001")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if agent == nil {
 		t.Fatal("after /local, RouteMessage should return RemoteAgent")
 	}
@@ -41,7 +44,10 @@ func TestRouter_SwitchToServer(t *testing.T) {
 	router.HandleSwitchCommand(sessionKey, "/local")
 	router.HandleSwitchCommand(sessionKey, "/server")
 
-	agent := router.RouteMessage(sessionKey, "ou_rt_002")
+	agent, err := router.RouteMessage(sessionKey, "ou_rt_002")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
 	if agent != nil {
 		t.Fatal("after /server, RouteMessage should return nil")
 	}
@@ -55,9 +61,12 @@ func TestRouter_AgentOffline(t *testing.T) {
 	sessionKey := "feishu:oc_chat:ou_offline_001"
 	router.HandleSwitchCommand(sessionKey, "/local")
 
-	agent := router.RouteMessage(sessionKey, "ou_offline_001")
+	agent, err := router.RouteMessage(sessionKey, "ou_offline_001")
+	if err != ErrAgentOffline {
+		t.Fatalf("expected ErrAgentOffline, got: %v", err)
+	}
 	if agent != nil {
-		t.Fatal("should return nil when agent offline")
+		t.Fatal("should return nil agent when offline")
 	}
 }
 
@@ -75,12 +84,18 @@ func TestRouter_UserIsolation(t *testing.T) {
 
 	router.HandleSwitchCommand(keyA, "/local")
 
-	agentB := router.RouteMessage(keyB, "ou_iso_B")
+	agentB, err := router.RouteMessage(keyB, "ou_iso_B")
+	if err != nil {
+		t.Fatalf("unexpected error for B: %v", err)
+	}
 	if agentB != nil {
 		t.Fatal("B should not be routed to remote")
 	}
 
-	agentA := router.RouteMessage(keyA, "ou_iso_A")
+	agentA, err := router.RouteMessage(keyA, "ou_iso_A")
+	if err != nil {
+		t.Fatalf("unexpected error for A: %v", err)
+	}
 	if agentA == nil {
 		t.Fatal("A should be routed to remote")
 	}

@@ -579,8 +579,10 @@ type PreviewStatusUpdater interface {
 // Implemented by agent/remote.Router, injected into Engine via SetRemoteRouter.
 type RemoteRouter interface {
 	// RouteMessage returns a remote Agent if the message should be forwarded,
-	// or nil to use the local agent.
-	RouteMessage(sessionKey, userID string) Agent
+	// or (nil, nil) to use the local agent.
+	// Returns (nil, ErrAgentOffline) when routing is configured for remote
+	// but the agent is disconnected.
+	RouteMessage(sessionKey, userID string) (Agent, error)
 	// HandleSwitchCommand processes /local and /server commands.
 	// Returns (true, reply) if consumed, (false, "") otherwise.
 	HandleSwitchCommand(sessionKey, content string) (handled bool, reply string)
