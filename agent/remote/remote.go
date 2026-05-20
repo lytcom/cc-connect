@@ -47,6 +47,9 @@ type RemoteAgent struct {
 
 	sessionKey string // CC_SESSION_KEY for the current turn
 
+	// Active sessions reported by the agent via agent_online message.
+	activeSessions []string
+
 	// Ping/pong support for diagnostics
 	pongCh chan int64
 }
@@ -164,6 +167,29 @@ func (a *RemoteAgent) Stop() error {
 	return nil
 }
 
+// ActiveSessions returns the session IDs reported by the agent via agent_online.
+func (a *RemoteAgent) ActiveSessions() []string {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return append([]string(nil), a.activeSessions...)
+}
+
+// SendCloseSession sends a close_session signal to the remote agent so it can
+// tear down the corresponding Claude Code session on the user's machine.
+func (a *RemoteAgent) SendCloseSession(sessionKey string) error {
+	if !a.connAlive.Load() {
+		return fmt.Errorf("agent not connected")
+	}
+	msg := map[string]any{
+		"type":        "close_session",
+		"session_key": sessionKey,
+	}
+	data, _ := json.Marshal(msg)
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.conn.WriteMessage(websocket.TextMessage, data)
+}
+
 // --- centralReadLoop: the ONLY reader of conn ---
 
 // centralReadLoop reads all messages from the WebSocket connection and dispatches
@@ -216,6 +242,21 @@ func (a *RemoteAgent) centralReadLoop() {
 				}
 			}
 			a.mu.Unlock()
+			continue
+		}
+
+		// For agent_online type, store active sessions
+		if envelope.Type == "agent_online" {
+			var onlineMsg struct {
+				Sessions []string `json:"sessions"`
+			}
+			if envelope.Raw != nil {
+				json.Unmarshal(envelope.Raw, &onlineMsg)
+			}
+			a.mu.Lock()
+			a.activeSessions = onlineMsg.Sessions
+			a.mu.Unlock()
+			log.Printf("[remote] agent_online: user=%s sessions=%v", a.userID, onlineMsg.Sessions)
 			continue
 		}
 
