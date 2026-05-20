@@ -66,9 +66,26 @@ func (d *Dispatcher) HandleConnect(w http.ResponseWriter, r *http.Request) {
 
 	d.mu.Lock()
 	if existing, ok := d.agents[reg.UserID]; ok {
-		existing.Stop() // Kick old connection
+		if !existing.connAlive.Load() {
+			// Agent is in reconnect window — hot-swap the connection
+			d.mu.Unlock()
+			// Send ACK first so client knows it's registered before resent prompts arrive
+			ack, _ := json.Marshal(map[string]string{"type": "register_ack", "status": "ok"})
+			conn.WriteMessage(websocket.TextMessage, ack)
+			existing.replaceConn(conn)
+			// Update meta
+			existing.mu.Lock()
+			existing.meta.ConnectedAt = time.Now()
+			existing.meta.IP = r.RemoteAddr
+			existing.meta.Version = reg.Version
+			existing.mu.Unlock()
+			log.Printf("[remote-dispatch] agent reconnected: user=%s", reg.UserID)
+			return
+		}
+		// Agent is still alive — kick old connection
+		existing.Stop()
 	}
-	agent := NewRemoteAgent(conn, reg.UserID)
+	agent := NewRemoteAgent(conn, reg.UserID, d)
 	agent.meta = AgentMeta{
 		ConnectedAt: time.Now(),
 		IP:          r.RemoteAddr,

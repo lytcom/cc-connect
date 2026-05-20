@@ -66,12 +66,12 @@ func TestRemoteAgentFullFlow(t *testing.T) {
 		t.Fatalf("prompt mismatch: %s", prompt.Prompt)
 	}
 
-	// Agent sends streaming events
-	events := []WireEvent{
-		{Type: "text", Content: "正在编译...", SessionID: "session-001"},
-		{Type: "tool_use", ToolName: "Bash", ToolInput: "make build", SessionID: "session-001"},
-		{Type: "tool_result", ToolResult: "BUILD SUCCESSFUL", SessionID: "session-001"},
-		{Type: "result", Content: "编译完成", SessionID: "session-001", Done: true, InputTokens: 1000, OutputTokens: 500},
+	// Agent sends streaming events using legacy wire format (top-level type/content/done)
+	events := []map[string]any{
+		{"type": "text", "content": "正在编译...", "session_id": "session-001"},
+		{"type": "tool_use", "tool_name": "Bash", "tool_input": "make build", "session_id": "session-001"},
+		{"type": "tool_result", "tool_result": "BUILD SUCCESSFUL", "session_id": "session-001"},
+		{"type": "result", "content": "编译完成", "session_id": "session-001", "done": true, "input_tokens": 1000, "output_tokens": 500},
 	}
 	for _, evt := range events {
 		d, _ := json.Marshal(evt)
