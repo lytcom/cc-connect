@@ -116,7 +116,7 @@ func (d *Dispatcher) IsOnline(userID string) bool {
 	d.mu.RLock()
 	defer d.mu.RUnlock()
 	a, ok := d.agents[userID]
-	return ok && a.conn != nil
+	return ok && a.connAlive.Load()
 }
 
 // RemoveAgent removes a disconnected agent.
