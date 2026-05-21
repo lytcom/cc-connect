@@ -125,6 +125,7 @@ type Platform struct {
 	allowFrom                  string
 	allowChat                  string
 	groupOnly                  bool
+	p2pOnly                    bool
 	groupReplyAll              bool
 	respondToAtEveryoneAndHere bool
 	shareSessionInChannel      bool
@@ -212,6 +213,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 	core.CheckAllowFrom(name, allowFrom)
 	allowChat, _ := opts["allow_chat"].(string)
 	groupOnly, _ := opts["group_only"].(bool)
+	p2pOnly, _ := opts["p2p_only"].(bool)
 	groupReplyAll, _ := opts["group_reply_all"].(bool)
 	// require_mention = false is equivalent to group_reply_all = true:
 	// both mean "respond to all group messages without needing an @mention".
@@ -280,6 +282,7 @@ func newPlatform(name, domain string, opts map[string]any) (core.Platform, error
 		allowFrom:                  allowFrom,
 		allowChat:                  allowChat,
 		groupOnly:                  groupOnly,
+		p2pOnly:                    p2pOnly,
 		groupReplyAll:              groupReplyAll,
 		respondToAtEveryoneAndHere: respondToAtEveryoneAndHere,
 		shareSessionInChannel:      shareSessionInChannel,
@@ -1085,6 +1088,10 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	}
 	if chatType != "group" && p.groupOnly {
 		slog.Debug(p.tag()+": p2p message skipped (group_only=true)", "chat_type", chatType)
+		return nil
+	}
+	if chatType == "group" && p.p2pOnly {
+		slog.Debug(p.tag()+": group message skipped (p2p_only=true)", "chat_type", chatType)
 		return nil
 	}
 
