@@ -223,8 +223,11 @@ func (a *RemoteAgent) centralReadLoop() {
 		// Store raw bytes for legacy fallback path
 		envelope.Raw = message
 
-		// Determine session_id for routing
+		// Determine session_id for routing (agent may send session_key instead)
 		sessionID := envelope.SessionID
+		if sessionID == "" {
+			sessionID = envelope.SessionKey
+		}
 
 		// For ack type, resolve pending prompt
 		if envelope.Type == "ack" {
@@ -391,6 +394,9 @@ func (a *RemoteAgent) dispatchBroadcastOrSingle(evt core.Event) {
 	if len(a.sessions) == 1 {
 		for _, s := range a.sessions {
 			if s.Alive() {
+				if s.timer != nil {
+					s.timer.Stop()
+				}
 				select {
 				case s.events <- evt:
 				default:
@@ -460,7 +466,7 @@ func (s *RemoteSession) Send(prompt string, images []core.ImageAttachment, files
 	// Start first-event timeout timer (only affects this session, never the conn).
 	timeout := s.firstEventTimeout
 	if timeout == 0 {
-		timeout = 90 * time.Second
+		timeout = 180 * time.Second
 	}
 	s.timer = time.AfterFunc(timeout, func() {
 		if s.timerFired.CompareAndSwap(false, true) {

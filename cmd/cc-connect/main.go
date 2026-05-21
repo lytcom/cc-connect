@@ -782,17 +782,24 @@ func main() {
 			stateFile := filepath.Join(cfg.DataDir, "remote_routing_state.json")
 			router := remote.NewRouter(dispatcher, stateFile)
 			engine.SetRemoteRouter(router)
-			// Start WebSocket server for remote agents
+			// Start WebSocket server for remote agents (with retry on bind failure)
 			go func() {
 				mux := http.NewServeMux()
 				mux.HandleFunc("/ws", dispatcher.HandleConnect)
 				adminAPI := remote.NewAdminAPI(dispatcher, router.GetState())
 				adminAPI.RegisterHandlers(mux)
 				addr := ":8901"
-				slog.Info("remote dispatch WebSocket server starting", "addr", addr)
-				if err := http.ListenAndServe(addr, mux); err != nil {
-					slog.Error("remote dispatch server failed", "err", err)
+				for attempt := 1; attempt <= 30; attempt++ {
+					slog.Info("remote dispatch WebSocket server starting", "addr", addr, "attempt", attempt)
+					err := http.ListenAndServe(addr, mux)
+					if err != nil {
+						slog.Error("remote dispatch server failed", "err", err, "attempt", attempt)
+						time.Sleep(2 * time.Second)
+						continue
+					}
+					return
 				}
+				slog.Error("remote dispatch server gave up after 30 attempts")
 			}()
 		}
 		engines = append(engines, engine)

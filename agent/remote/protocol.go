@@ -12,14 +12,15 @@ const EventAck core.EventType = "ack"
 
 // WireEnvelope is the envelope format for agent <-> server communication.
 type WireEnvelope struct {
-	Type      string          `json:"type"`
-	SessionID string          `json:"session_id,omitempty"`
-	Done      bool            `json:"done,omitempty"`
-	Payload   json.RawMessage `json:"payload,omitempty"`
-	ErrorMsg  string          `json:"error,omitempty"`
-	PromptID  string          `json:"prompt_id,omitempty"`
-	Ts        int64           `json:"ts,omitempty"`
-	Raw       json.RawMessage `json:"-"` // original bytes for legacy fallback
+	Type       string          `json:"type"`
+	SessionID  string          `json:"session_id,omitempty"`
+	SessionKey string          `json:"session_key,omitempty"`
+	Done       bool            `json:"done,omitempty"`
+	Payload    json.RawMessage `json:"payload,omitempty"`
+	ErrorMsg   string          `json:"error,omitempty"`
+	PromptID   string          `json:"prompt_id,omitempty"`
+	Ts         int64           `json:"ts,omitempty"`
+	Raw        json.RawMessage `json:"-"` // original bytes for legacy fallback
 }
 
 // parseEvent converts a WireEnvelope into a core.Event.
