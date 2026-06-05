@@ -723,6 +723,28 @@ func (sm *SessionManager) load() {
 	slog.Info("session: loaded from disk", "path", sm.storePath, "sessions", len(sm.sessions))
 }
 
+// ClearAllAgentSessions unconditionally clears AgentSessionID on all sessions.
+// Called at startup to avoid resuming stale sessions after a process restart.
+func (sm *SessionManager) ClearAllAgentSessions() {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	cleared := 0
+	for _, s := range sm.sessions {
+		s.mu.Lock()
+		if s.AgentSessionID != "" {
+			s.recordPastAgentSessionID()
+			s.AgentSessionID = ""
+			cleared++
+		}
+		s.mu.Unlock()
+	}
+	if cleared > 0 {
+		slog.Info("session: cleared stale agent sessions on startup", "count", cleared)
+		sm.saveLocked()
+	}
+}
+
 // InvalidateForAgent clears AgentSessionID on all sessions whose AgentType
 // does not match the current agent. This handles the case where the user
 // switches agent types (e.g. opencode → pi) and stale session IDs from the

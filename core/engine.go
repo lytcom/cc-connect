@@ -435,6 +435,7 @@ func NewEngine(name string, ag Agent, platforms []Platform, sessionStorePath str
 		showContextIndicator:  true,
 	}
 
+	e.sessions.ClearAllAgentSessions()
 	if ag != nil {
 		e.sessions.InvalidateForAgent(ag.Name())
 	}
@@ -2620,7 +2621,7 @@ func (e *Engine) processInteractiveMessageWith(p Platform, msg *Message, session
 	if agent != e.agent {
 		agentOverride = agent
 	}
-	state := e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey)
+	state := e.getOrCreateInteractiveStateWith(interactiveKey, p, msg.ReplyCtx, session, sessions, agentOverride, ccSessionKey, msg.UserID)
 
 	// Set workspaceDir on the state for idle reaper identification
 	if workspaceDir != "" {
@@ -2868,7 +2869,7 @@ func adoptPendingFromPlaceholder(existing, newState *interactiveState) {
 
 // When agentOverride is non-nil it is used instead of e.agent to start the session.
 // ccSessionKey, when non-empty, is used for CC_SESSION_KEY env injection; otherwise sessionKey is used.
-func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, sessions *SessionManager, agentOverride Agent, ccSessionKey string) *interactiveState {
+func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, replyCtx any, session *Session, sessions *SessionManager, agentOverride Agent, ccSessionKey string, userID string) *interactiveState {
 	e.interactiveMu.Lock()
 	defer e.interactiveMu.Unlock()
 
@@ -2920,6 +2921,7 @@ func (e *Engine) getOrCreateInteractiveStateWith(sessionKey string, p Platform, 
 		envVars := []string{
 			"CC_PROJECT=" + e.name,
 			"CC_SESSION_KEY=" + ccKey,
+			"CC_USER_ID=" + userID,
 		}
 		if e.dataDir != "" {
 			envVars = append(envVars, "CC_DATA_DIR="+e.dataDir)
@@ -3466,6 +3468,9 @@ type agentErrorHandler struct {
 
 var agentErrorHandlers = []agentErrorHandler{
 	{"Session not found", MsgSessionNotFound},
+	{"API Error: 400", MsgSessionAPIError},
+	{"API Error: 401", MsgSessionAPIError},
+	{"API Error: 403", MsgSessionAPIError},
 }
 
 func (e *Engine) processInteractiveEvents(state *interactiveState, session *Session, sessions *SessionManager, sessionKey string, msgID string, turnStart time.Time, stopTypingFn func(), sendDone <-chan error, replyCtx any) {
@@ -4158,6 +4163,33 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				fullResponse = e.i18n.T(MsgEmptyResponse)
 			}
 
+			// Detect API errors from stale sessions (e.g. "API Error: 400 Param Incorrect").
+			// When Claude CLI resumes a corrupted/expired session, the API returns 4xx
+			// which gets output as text. Intercept this, reset the session, and ask
+			// the user to resend instead of delivering a confusing error message.
+			if isAPISessionError(fullResponse) && toolCount == 0 {
+				slog.Warn("API error detected in response, resetting session",
+					"session_key", sessionKey, "response", fullResponse)
+				session.SetAgentSessionID("", e.agent.Name())
+				sessions.Save()
+				state.mu.Lock()
+				state.eventsNeedResync = true
+				state.mu.Unlock()
+				e.cleanupInteractiveState(sessionKey, state)
+				// Clean up any in-flight preview or streaming card so the raw
+				// error text doesn't remain visible to the user.
+				sp.discard()
+				if streamCard != nil && !streamCard.Failed() {
+					_ = streamCard.Finalize(e.ctx, e.i18n.T(MsgSessionAPIError))
+				} else if cardMessageID != nil {
+					if cleaner, ok := p.(PreviewCleaner); ok {
+						_ = cleaner.DeletePreviewMessage(e.ctx, cardMessageID)
+					}
+				}
+				e.send(p, replyCtx, e.i18n.T(MsgSessionAPIError))
+				return
+			}
+
 			// Context usage indicator: prefer SDK tokens, fall back to self-reported.
 			sdkPlausible := event.InputTokens >= 100
 			selfPct := parseSelfReportedCtx(fullResponse)
@@ -4552,6 +4584,9 @@ func (e *Engine) processInteractiveEvents(state *interactiveState, session *Sess
 				for _, h := range agentErrorHandlers {
 					if strings.Contains(errMsg, h.contains) {
 						userMsg = e.i18n.T(h.msgKey)
+						// Clear stale session ID so next message spawns fresh
+						session.SetAgentSessionID("", e.agent.Name())
+						sessions.Save()
 						break
 					}
 				}
@@ -13892,6 +13927,16 @@ func contextIndicatorText(inputTokens int) string {
 		pct = 100
 	}
 	return fmt.Sprintf("[ctx: ~%d%%]", pct)
+}
+
+// apiErrorRe matches API error responses from Claude CLI that indicate a stale/corrupted session.
+// These errors occur when --resume is used with an expired or invalid session ID.
+// Pattern matches: "API Error: 400 ...", "API Error: 401 ...", "API Error: 403 ..."
+var apiErrorRe = regexp.MustCompile(`(?i)^(?:\s*(?:❌\s*)?)?API\s*Error:\s*(?:4\d{2})\b`)
+
+// isAPISessionError checks if the response text is an API error indicating a stale session.
+func isAPISessionError(text string) bool {
+	return apiErrorRe.MatchString(strings.TrimSpace(text))
 }
 
 // ctxSelfReportRe matches agent self-reported context lines like "[ctx: ~42%]".
