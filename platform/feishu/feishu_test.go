@@ -1119,6 +1119,207 @@ func TestOnMessageThreadIsolationAdmitsAttachmentWithoutMention(t *testing.T) {
 	}
 }
 
+// TestOnMessageFailClosedWhenBotOpenIDEmpty verifies that group messages are
+// dropped (fail-closed) when botOpenID is empty. This prevents the bot from
+// responding to every group message when the bot identity is unknown.
+func TestOnMessageFailClosedWhenBotOpenIDEmpty(t *testing.T) {
+	dispatched := false
+	p := &Platform{
+		platformName: "feishu",
+		botOpenID:    "", // empty — simulates DNS failure at startup
+		dedup:        &core.MessageDedup{},
+		handler: func(_ core.Platform, _ *core.Message) {
+			dispatched = true
+		},
+	}
+
+	chatType := "group"
+	senderType := "user"
+	now := time.Now().UnixMilli()
+	createTime := strconv.FormatInt(now, 10)
+
+	ev := &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId:   &larkim.UserId{OpenId: stringPtr("ou_user")},
+				SenderType: &senderType,
+			},
+			Message: &larkim.EventMessage{
+				MessageId:   stringPtr("om_group_msg"),
+				ChatId:      stringPtr("oc_chat"),
+				ChatType:    &chatType,
+				MessageType: stringPtr("text"),
+				Content:     stringPtr(`{"text":"hello bot"}`),
+				CreateTime:  &createTime,
+			},
+		},
+	}
+
+	if err := p.onMessage(context.Background(), ev); err != nil {
+		t.Fatalf("onMessage error: %v", err)
+	}
+
+	// Give handler a chance to fire (it shouldn't).
+	select {
+	case <-time.After(200 * time.Millisecond):
+		// expected — message dropped
+	default:
+	}
+
+	if dispatched {
+		t.Fatal("group message was dispatched despite empty botOpenID — expected fail-closed drop")
+	}
+}
+
+// TestOnMessageFailClosedBypassedForP2P verifies that p2p messages are NOT
+// affected by the empty botOpenID fail-closed check (p2p doesn't need @bot).
+func TestOnMessageFailClosedBypassedForP2P(t *testing.T) {
+	received := make(chan *core.Message, 1)
+	p := &Platform{
+		platformName: "feishu",
+		botOpenID:    "", // empty
+		dedup:        &core.MessageDedup{},
+		handler: func(_ core.Platform, msg *core.Message) {
+			received <- msg
+		},
+	}
+	// Pre-populate caches to avoid API calls in dispatchMessage.
+	p.userNameCache.Store("ou_user", "Test User")
+	p.chatNameCache.Store("oc_chat", "Test Chat")
+
+	chatType := "p2p"
+	senderType := "user"
+	now := time.Now().UnixMilli()
+	createTime := strconv.FormatInt(now, 10)
+
+	ev := &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId:   &larkim.UserId{OpenId: stringPtr("ou_user")},
+				SenderType: &senderType,
+			},
+			Message: &larkim.EventMessage{
+				MessageId:   stringPtr("om_p2p_msg"),
+				ChatId:      stringPtr("oc_chat"),
+				ChatType:    &chatType,
+				MessageType: stringPtr("text"),
+				Content:     stringPtr(`{"text":"hello"}`),
+				CreateTime:  &createTime,
+			},
+		},
+	}
+
+	if err := p.onMessage(context.Background(), ev); err != nil {
+		t.Fatalf("onMessage error: %v", err)
+	}
+
+	select {
+	case msg := <-received:
+		if msg.MessageID != "om_p2p_msg" {
+			t.Fatalf("unexpected message ID: %q", msg.MessageID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("p2p message was dropped despite botOpenID being empty — p2p should not be affected")
+	}
+}
+
+// TestOnMessageFailClosedBypassedForGroupReplyAll verifies that when
+// group_reply_all=true, group messages pass through even with empty botOpenID.
+func TestOnMessageFailClosedBypassedForGroupReplyAll(t *testing.T) {
+	received := make(chan *core.Message, 1)
+	p := &Platform{
+		platformName:   "feishu",
+		botOpenID:      "", // empty
+		groupReplyAll:  true,
+		dedup:          &core.MessageDedup{},
+		handler: func(_ core.Platform, msg *core.Message) {
+			received <- msg
+		},
+	}
+	// Pre-populate caches to avoid API calls in dispatchMessage.
+	p.userNameCache.Store("ou_user", "Test User")
+	p.chatNameCache.Store("oc_chat", "Test Chat")
+
+	chatType := "group"
+	senderType := "user"
+	now := time.Now().UnixMilli()
+	createTime := strconv.FormatInt(now, 10)
+
+	ev := &larkim.P2MessageReceiveV1{
+		Event: &larkim.P2MessageReceiveV1Data{
+			Sender: &larkim.EventSender{
+				SenderId:   &larkim.UserId{OpenId: stringPtr("ou_user")},
+				SenderType: &senderType,
+			},
+			Message: &larkim.EventMessage{
+				MessageId:   stringPtr("om_group_replyall"),
+				ChatId:      stringPtr("oc_chat"),
+				ChatType:    &chatType,
+				MessageType: stringPtr("text"),
+				Content:     stringPtr(`{"text":"hello everyone"}`),
+				CreateTime:  &createTime,
+			},
+		},
+	}
+
+	if err := p.onMessage(context.Background(), ev); err != nil {
+		t.Fatalf("onMessage error: %v", err)
+	}
+
+	select {
+	case msg := <-received:
+		if msg.MessageID != "om_group_replyall" {
+			t.Fatalf("unexpected message ID: %q", msg.MessageID)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("group_reply_all message was dropped despite botOpenID being empty — group_reply_all should bypass @bot filter")
+	}
+}
+
+// TestRetryBotOpenIDContextCancelled verifies that retryBotOpenID stops
+// when the context is cancelled (e.g., platform shutdown).
+func TestRetryBotOpenIDContextCancelled(t *testing.T) {
+	attempts := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts++
+		// Simulate slow API — the context should cancel before we respond.
+		time.Sleep(5 * time.Second)
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"code":0,"bot":{"open_id":"ou_bot"}}`))
+	}))
+	defer srv.Close()
+
+	p := &Platform{
+		platformName: "feishu-test",
+		client: lark.NewClient("cli_test", "secret",
+			lark.WithOpenBaseUrl(srv.URL),
+			lark.WithHttpClient(srv.Client()),
+		),
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan struct{})
+	go func() {
+		p.retryBotOpenID(ctx)
+		close(done)
+	}()
+
+	// Cancel after a short delay.
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+
+	select {
+	case <-done:
+		// retryBotOpenID exited — good.
+	case <-time.After(2 * time.Second):
+		t.Fatal("retryBotOpenID did not exit after context cancellation")
+	}
+
+	if p.getBotOpenID() != "" {
+		t.Fatalf("botOpenID should be empty after cancellation, got %q", p.getBotOpenID())
+	}
+}
+
 func extractBasePlatform(p core.Platform) *Platform {
 	if fp, ok := p.(*Platform); ok {
 		return fp

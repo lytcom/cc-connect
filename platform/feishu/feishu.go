@@ -141,8 +141,9 @@ type Platform struct {
 	cardNavHandler   core.CardNavigationHandler
 	cancel           context.CancelFunc
 	dedup            *core.MessageDedup
-	botOpenID        string
-	peerBots         map[string]string // app_id -> friendly alias, for quoted-reply attribution
+	botOpenID            string
+	needsBotOpenIDRetry  bool // set by Start() when fetchBotOpenID fails; retry launched after context creation
+	peerBots             map[string]string // app_id -> friendly alias, for quoted-reply attribution
 	userNameCache    sync.Map          // open_id -> display name
 	chatNameCache    sync.Map          // chat_id -> chat name
 	chatMemberCache  sync.Map          // chatID -> *chatMemberEntry
@@ -354,20 +355,21 @@ func (p *Platform) Start(handler core.MessageHandler) error {
 	p.handler = handler
 	p.mu.Unlock()
 
-	// In webhook mode (private/self-hosted Feishu/Lark), startup must not depend
-	// on a successful bot-info API call. Older private deployments may not support
-	// the same auth/bootstrap flow as the public SDK path, but the webhook server
-	// can still receive events and operate correctly. We therefore only attempt
-	// bot open_id discovery eagerly for WebSocket mode.
-	if !p.shouldUseWebhookMode() {
-		if openID, err := p.fetchBotOpenID(); err != nil {
-			slog.Warn(p.platformName+": failed to get bot open_id, group chat filtering disabled", "error", err)
-		} else {
-			p.mu.Lock()
-			p.botOpenID = openID
-			p.mu.Unlock()
-			slog.Info(p.platformName+": bot identified", "open_id", openID)
-		}
+	// Fetch bot open_id for @bot mention filtering in group chats.
+	// Both WebSocket and webhook modes need this — without it, group messages
+	// are dropped (fail-closed) because we can't determine if the bot was mentioned.
+	if openID, err := p.fetchBotOpenID(); err != nil {
+		slog.Warn(p.platformName+": failed to get bot open_id, retrying in background (group messages will be dropped until resolved)", "error", err)
+		// retryBotOpenID will be launched after the context is created below.
+		p.needsBotOpenIDRetry = true
+	} else if openID != "" {
+		p.mu.Lock()
+		p.botOpenID = openID
+		p.mu.Unlock()
+		slog.Info(p.platformName+": bot identified", "open_id", openID)
+	} else {
+		slog.Warn(p.platformName+": bot open_id empty from API, retrying in background (group messages will be dropped until resolved)")
+		p.needsBotOpenIDRetry = true
 	}
 
 	// Register for shared WebSocket: multiple projects using the same app_id
@@ -474,6 +476,10 @@ func (p *Platform) startWebSocketMode() error {
 	p.cancel = cancel
 	p.mu.Unlock()
 
+	if p.needsBotOpenIDRetry {
+		go p.retryBotOpenID(ctx)
+	}
+
 	go func() {
 		if err := p.wsClient.Start(ctx); err != nil {
 			slog.Error(p.tag()+": websocket error", "error", err)
@@ -488,15 +494,18 @@ func (p *Platform) startWebhookMode() error {
 	mux := http.NewServeMux()
 	mux.HandleFunc(p.callbackPath, p.webhookHandler)
 
+	ctx, cancel := context.WithCancel(context.Background())
 	p.mu.Lock()
 	p.server = &http.Server{
 		Addr:    ":" + p.port,
 		Handler: mux,
 	}
-
-	_, cancel := context.WithCancel(context.Background())
 	p.cancel = cancel
 	p.mu.Unlock()
+
+	if p.needsBotOpenIDRetry {
+		go p.retryBotOpenID(ctx)
+	}
 
 	go func() {
 		slog.Info(p.tag()+": webhook server listening", "port", p.port, "path", p.callbackPath)
@@ -1056,7 +1065,14 @@ func (p *Platform) onMessage(ctx context.Context, event *larkim.P2MessageReceive
 	// thread set; sessionKey is also used downstream for dispatch.
 	sessionKey := p.makeSessionKey(msg, chatID, userID)
 
-	if chatType == "group" && !p.groupReplyAll && p.getBotOpenID() != "" {
+	if chatType == "group" && !p.groupReplyAll {
+		if p.getBotOpenID() == "" {
+			// Fail-closed: bot identity unknown, cannot determine if
+			// the message @mentions the bot. Silently drop the message
+			// rather than risk responding to every group message.
+			slog.Warn(p.tag()+": dropping group message — bot open_id unavailable (DNS/network issue?)", "chat_id", chatID)
+			return nil
+		}
 		if !isBotMentioned(msg.Mentions, p.getBotOpenID()) {
 			switch {
 			// Feishu @all sends {"text":"@_all"} with 0 mentions.
@@ -2834,6 +2850,50 @@ func (p *Platform) fetchBotOpenID() (string, error) {
 		return "", fmt.Errorf("api code=%d", result.Code)
 	}
 	return result.Bot.OpenID, nil
+}
+
+// retryBotOpenID attempts to resolve the bot's open_id with exponential backoff.
+// Runs in a background goroutine; once resolved, sets botOpenID and stops.
+// While unresolved, group messages are dropped (fail-closed) by onMessage.
+// The ctx is cancelled when the platform stops, terminating the retry loop early.
+func (p *Platform) retryBotOpenID(ctx context.Context) {
+	backoff := 2 * time.Second
+	const maxBackoff = 2 * time.Minute
+	const maxAttempts = 15
+
+	for attempt := 1; attempt <= maxAttempts; attempt++ {
+		select {
+		case <-ctx.Done():
+			slog.Info(p.platformName + ": bot open_id retry cancelled (platform stopping)")
+			return
+		case <-time.After(backoff):
+		}
+
+		openID, err := p.fetchBotOpenID()
+		if err != nil {
+			slog.Warn(p.platformName+": bot open_id retry failed",
+				"attempt", attempt, "backoff", backoff, "error", err)
+			backoff = min(backoff*2, maxBackoff)
+			continue
+		}
+
+		if openID == "" {
+			slog.Warn(p.platformName+": bot open_id retry returned empty — will retry",
+				"attempt", attempt, "backoff", backoff)
+			backoff = min(backoff*2, maxBackoff)
+			continue
+		}
+
+		p.mu.Lock()
+		p.botOpenID = openID
+		p.mu.Unlock()
+		slog.Info(p.platformName+": bot identified (after retry)",
+			"open_id", openID, "attempt", attempt)
+		return
+	}
+
+	slog.Error(p.platformName+": bot open_id unresolved after all retries — group messages will continue to be dropped",
+		"max_attempts", maxAttempts)
 }
 
 func isBotMentioned(mentions []*larkim.MentionEvent, botOpenID string) bool {
